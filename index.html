@@ -303,6 +303,39 @@
     border-radius: 50%;
   }
 
+  #csv-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 4px 10px;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    white-space: nowrap;
+    transition: border-color 0.2s;
+  }
+  #csv-label:hover { border-color: var(--accent); }
+  #csv-label.loaded { border-color: var(--green); border-style: solid; }
+  #csv-label.loaded #csv-status { color: var(--green); }
+
+  .known-name {
+    font-size: 10px;
+    fill: var(--orange);
+    pointer-events: none;
+    font-weight: 600;
+  }
+
+  .info-known-tag {
+    display: inline-block;
+    background: rgba(245,166,35,0.15);
+    border: 1px solid var(--orange);
+    color: var(--orange);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -322,6 +355,10 @@
     <span id="depth-val">3</span>
   </div>
   <div id="node-status"><span class="dot" id="node-dot"></span><span id="node-label">checking...</span></div>
+  <label id="csv-label" title="Load addresses.csv to label known wallets">
+    <span id="csv-status">No labels</span>
+    <input type="file" id="csv-input" accept=".csv" style="display:none" />
+  </label>
 </div>
 
 <div id="canvas-container">
@@ -347,6 +384,7 @@
   <span><span class="swatch" style="background: var(--accent)"></span> Wallet (9...)</span>
   <span><span class="swatch" style="background: var(--purple)"></span> Contract</span>
   <span><span class="swatch" style="background: var(--orange)"></span> Mining</span>
+  <span><span class="swatch" style="background: #00f2fe"></span> Service</span>
   <span><span class="swatch" style="background: var(--green)"></span> Root</span>
 </div>
 
@@ -368,6 +406,79 @@ let simulation = null;
 let svg, gLinks, gNodes, zoom;
 let preloadQueue = [];
 let preloading = false;
+
+// === KNOWN ADDRESSES (from addresses.csv) ===
+const PREFIX_LEN = 10;
+const knownAddresses = new Map(); // prefix -> { address, name, type }
+
+function parseCSV(text) {
+  const lines = text.trim().split('\n');
+  if (lines.length < 2) return;
+  knownAddresses.clear();
+  let count = 0;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    // Handle CSV with possible commas in quoted fields
+    const parts = line.match(/(".*?"|[^,]+)/g);
+    if (!parts || parts.length < 3) continue;
+    const address = parts[0].replace(/"/g, '').trim();
+    const name = parts[1].replace(/"/g, '').trim();
+    const type = parts[2].replace(/"/g, '').trim();
+    if (address.length >= PREFIX_LEN) {
+      knownAddresses.set(address.slice(0, PREFIX_LEN), { address, name, type });
+      count++;
+    }
+  }
+  console.log('[CSV] Loaded', count, 'known addresses');
+  return count;
+}
+
+function lookupKnown(addr) {
+  if (!addr || addr.length < PREFIX_LEN) return null;
+  return knownAddresses.get(addr.slice(0, PREFIX_LEN)) || null;
+}
+
+function displayName(addr) {
+  const known = lookupKnown(addr);
+  return known ? known.name : shortAddr(addr);
+}
+
+// Auto-load addresses.csv from same directory (works when served via HTTP)
+async function autoLoadCSV() {
+  try {
+    const r = await fetch('addresses.csv', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      const text = await r.text();
+      const count = parseCSV(text);
+      if (count > 0) {
+        document.getElementById('csv-status').textContent = count + ' labels';
+        document.getElementById('csv-label').classList.add('loaded');
+        showToast('Loaded ' + count + ' known address labels');
+      }
+    }
+  } catch { /* file:// won't serve this, user can use file picker */ }
+}
+
+// Manual CSV file picker
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('csv-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const count = parseCSV(ev.target.result);
+      if (count > 0) {
+        document.getElementById('csv-status').textContent = count + ' labels';
+        document.getElementById('csv-label').classList.add('loaded');
+        showToast('Loaded ' + count + ' known address labels');
+        // Re-render graph to show labels
+        if (graphNodes.size > 0) renderGraph();
+      }
+    };
+    reader.readAsText(file);
+  });
+});
 
 // === NODE HEALTH ===
 async function checkNodes() {
@@ -501,8 +612,13 @@ function nanoToErg(n) { return (n / 1e9).toFixed(4); }
 
 function addrType(addr) {
   if (!addr) return 'unknown';
+  const known = lookupKnown(addr);
+  if (known) {
+    const kt = known.type.toLowerCase();
+    if (kt.includes('mining') || kt.includes('pool')) return 'mining';
+    if (kt.includes('service') || kt.includes('exchange') || kt.includes('dex')) return 'service';
+  }
   if (addr.startsWith('9')) return 'wallet';
-  // Known mining-related prefixes (common Ergo mining contracts)
   if (addr.startsWith('88dhg') || addr.startsWith('2Z4t')) return 'mining';
   return 'contract';
 }
@@ -512,6 +628,7 @@ function nodeColor(addr) {
   const t = addrType(addr);
   if (t === 'wallet') return '#4facfe';
   if (t === 'mining') return '#f5a623';
+  if (t === 'service') return '#00f2fe';
   return '#b388ff';
 }
 
@@ -748,6 +865,14 @@ function renderGraph() {
     .attr('dy', 3.5)
     .text('M');
 
+  // Known name label (above the node)
+  nodeEnter.filter(d => lookupKnown(d.id))
+    .append('text')
+    .attr('class', 'known-name')
+    .attr('dy', d => (d.id === rootAddress ? -22 : -18))
+    .attr('text-anchor', 'middle')
+    .text(d => lookupKnown(d.id).name);
+
   // Address label
   nodeEnter.append('text')
     .attr('class', 'node-label')
@@ -833,7 +958,8 @@ async function showInfoPanel(addr) {
   const title = document.getElementById('panel-title');
 
   panel.classList.add('open');
-  title.textContent = isWallet(addr) ? 'Wallet Details' : 'Contract Details';
+  const knownTitle = lookupKnown(addr);
+  title.textContent = knownTitle ? knownTitle.name : (isWallet(addr) ? 'Wallet Details' : 'Contract Details');
 
   body.innerHTML = '<div style="text-align:center;padding:30px"><div class="spinner"></div></div>';
 
@@ -843,12 +969,14 @@ async function showInfoPanel(addr) {
   let html = '';
 
   // Address section
+  const known = lookupKnown(addr);
   html += `<div class="info-section">
     <h4>Address</h4>
+    ${known ? `<div class="info-known-tag">${known.name} (${known.type})</div>` : ''}
     <div style="font-size:11px;word-break:break-all;color:var(--accent);margin-bottom:6px">${addr}</div>
     <div class="info-row">
       <span class="label">Type</span>
-      <span class="value ${isContract(addr) ? 'contract' : ''}">${addrType(addr).toUpperCase()}</span>
+      <span class="value ${isContract(addr) ? 'contract' : ''}">${known ? known.type.toUpperCase() : addrType(addr).toUpperCase()}</span>
     </div>
     <div class="info-row">
       <span class="label">Balance</span>
@@ -906,9 +1034,11 @@ async function showInfoPanel(addr) {
   if (connected.length > 0) {
     html += `<div class="info-section"><h4>Connected (${connected.length})</h4>`;
     for (const ca of connected.slice(0, 30)) {
-      const ctype = addrType(ca);
+      const cKnown = lookupKnown(ca);
+      const ctype = cKnown ? cKnown.type : addrType(ca);
+      const cLabel = cKnown ? `${cKnown.name} (${shortAddr(ca)})` : shortAddr(ca);
       html += `<div class="info-row">
-        <span class="addr-short" onclick="showInfoPanel('${ca}')">${shortAddr(ca)}</span>
+        <span class="addr-short" onclick="showInfoPanel('${ca}')">${cLabel}</span>
         <span class="value ${isContract(ca) ? 'contract' : ''}">${ctype}</span>
       </div>`;
     }
@@ -1040,6 +1170,7 @@ document.getElementById('address-input').addEventListener('keydown', function(e)
 
 // === INIT ===
 checkNodes();
+autoLoadCSV();
 </script>
 
 </body>
