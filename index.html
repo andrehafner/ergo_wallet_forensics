@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ergo Wallet Forensics</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #131a2b;
+    --border: #1e2a42;
+    --text: #e0e6f0;
+    --text-dim: #6b7a99;
+    --accent: #4facfe;
+    --accent2: #00f2fe;
+    --green: #43e97b;
+    --orange: #f5a623;
+    --red: #ff6b6b;
+    --purple: #b388ff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  #header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 100;
+    background: linear-gradient(180deg, var(--bg) 0%, rgba(10,14,23,0.95) 100%);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+  }
+
+  #header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    white-space: nowrap;
+  }
+
+  #search-box {
+    flex: 1;
+    max-width: 600px;
+    display: flex;
+    gap: 8px;
+  }
+
+  #address-input {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  #address-input:focus { border-color: var(--accent); }
+  #address-input::placeholder { color: var(--text-dim); }
+
+  #scan-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border: none;
+    color: #000;
+    padding: 8px 20px;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: opacity 0.2s;
+  }
+  #scan-btn:hover { opacity: 0.85; }
+  #scan-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #node-status {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  #node-status .dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  #node-status .dot.ok { background: var(--green); }
+  #node-status .dot.err { background: var(--red); }
+
+  #depth-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  #depth-control input[type="range"] {
+    width: 80px;
+    accent-color: var(--accent);
+  }
+
+  #canvas-container {
+    position: fixed;
+    top: 52px; left: 0; right: 0; bottom: 0;
+  }
+
+  svg { width: 100%; height: 100%; }
+
+  .link {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 1.5;
+    stroke-opacity: 0.6;
+  }
+  .link.highlighted {
+    stroke: var(--accent);
+    stroke-opacity: 1;
+    stroke-width: 2.5;
+  }
+
+  .node-group { cursor: pointer; }
+  .node-group:hover .node-circle { filter: brightness(1.3); }
+
+  .node-circle {
+    stroke-width: 2;
+    transition: filter 0.2s;
+  }
+
+  .node-label {
+    font-size: 10px;
+    fill: var(--text-dim);
+    pointer-events: none;
+  }
+
+  .node-balance {
+    font-size: 9px;
+    fill: var(--green);
+    pointer-events: none;
+  }
+
+  .node-badge {
+    font-size: 8px;
+    fill: #000;
+    font-weight: 700;
+    pointer-events: none;
+  }
+
+  #info-panel {
+    position: fixed;
+    right: 0; top: 52px; bottom: 0;
+    width: 380px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 90;
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #info-panel.open { transform: translateX(0); }
+
+  #info-panel-header {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  #info-panel-header h3 { font-size: 13px; font-weight: 600; }
+  #panel-close {
+    background: none; border: none; color: var(--text-dim);
+    cursor: pointer; font-size: 18px; line-height: 1;
+  }
+
+  #info-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 16px;
+  }
+
+  .info-section { margin-bottom: 16px; }
+  .info-section h4 {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12px;
+    border-bottom: 1px solid rgba(30,42,66,0.5);
+  }
+  .info-row .label { color: var(--text-dim); }
+  .info-row .value { color: var(--text); text-align: right; word-break: break-all; max-width: 200px; }
+  .info-row .value.erg { color: var(--green); }
+  .info-row .value.contract { color: var(--purple); }
+
+  .token-list { max-height: 200px; overflow-y: auto; }
+  .token-item {
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(30,42,66,0.3);
+    font-size: 11px;
+  }
+  .token-item .token-name { color: var(--orange); }
+  .token-item .token-amount { color: var(--text); float: right; }
+
+  .tx-list { max-height: 300px; overflow-y: auto; }
+  .tx-item {
+    padding: 6px 8px;
+    margin-bottom: 4px;
+    background: rgba(10,14,23,0.5);
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .tx-item:hover { background: rgba(79,172,254,0.1); }
+  .tx-item .tx-id { color: var(--accent); word-break: break-all; }
+  .tx-item .tx-meta { color: var(--text-dim); margin-top: 2px; }
+
+  .addr-short { color: var(--accent); cursor: pointer; }
+  .addr-short:hover { text-decoration: underline; }
+
+  #loading-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(10,14,23,0.8);
+    z-index: 200;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 16px;
+  }
+  #loading-overlay.show { display: flex; }
+
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #loading-text { font-size: 13px; color: var(--text-dim); }
+
+  #toast {
+    position: fixed;
+    bottom: 20px; left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 12px;
+    color: var(--text);
+    z-index: 300;
+    transition: transform 0.3s ease;
+    pointer-events: none;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+
+  #legend {
+    position: fixed;
+    bottom: 16px; left: 16px;
+    font-size: 10px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 14px;
+    z-index: 80;
+  }
+  #legend span { display: flex; align-items: center; gap: 4px; }
+  #legend .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+  }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>ERGO WALLET FORENSICS</h1>
+  <div id="search-box">
+    <input id="address-input" type="text" placeholder="Enter Ergo wallet address (starts with 9)..." spellcheck="false" />
+    <button id="scan-btn" onclick="startScan()">SCAN</button>
+  </div>
+  <div id="depth-control">
+    <span>Depth:</span>
+    <input type="range" id="depth-slider" min="1" max="5" value="3" />
+    <span id="depth-val">3</span>
+  </div>
+  <div id="node-status"><span class="dot" id="node-dot"></span><span id="node-label">checking...</span></div>
+</div>
+
+<div id="canvas-container">
+  <svg id="tree-svg"></svg>
+</div>
+
+<div id="info-panel">
+  <div id="info-panel-header">
+    <h3 id="panel-title">Address Details</h3>
+    <button id="panel-close" onclick="closePanel()">&times;</button>
+  </div>
+  <div id="info-panel-body"></div>
+</div>
+
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <div id="loading-text">Scanning wallet...</div>
+</div>
+
+<div id="toast"></div>
+
+<div id="legend">
+  <span><span class="swatch" style="background: var(--accent)"></span> Wallet (9...)</span>
+  <span><span class="swatch" style="background: var(--purple)"></span> Contract</span>
+  <span><span class="swatch" style="background: var(--orange)"></span> Mining</span>
+  <span><span class="swatch" style="background: var(--green)"></span> Root</span>
+</div>
+
+<script>
+// === CONFIG ===
+const NODES = [
+  'http://128.253.41.100:9053',
+  'http://128.253.41.101:9053',
+  'http://128.253.41.102:9053',
+];
+
+let activeNode = null;
+const cache = new Map();          // address -> { balance, tokens, txs }
+const graphNodes = new Map();     // address -> graph node data
+const graphLinks = [];            // { source, target, txId, value }
+let rootAddress = null;
+let maxDepth = 3;
+let simulation = null;
+let svg, gLinks, gNodes, zoom;
+let preloadQueue = [];
+let preloading = false;
+
+// === NODE HEALTH ===
+async function checkNodes() {
+  const dot = document.getElementById('node-dot');
+  const label = document.getElementById('node-label');
+  for (const node of NODES) {
+    try {
+      const r = await fetch(node + '/info', { signal: AbortSignal.timeout(4000) });
+      if (r.ok) {
+        activeNode = node;
+        dot.className = 'dot ok';
+        const info = await r.json();
+        label.textContent = 'Node OK | Height: ' + (info.fullHeight || '?');
+        return;
+      }
+    } catch(e) { /* try next */ }
+  }
+  dot.className = 'dot err';
+  label.textContent = 'All nodes offline';
+}
+
+// === API ===
+async function apiGet(path) {
+  if (!activeNode) throw new Error('No active node');
+  const url = activeNode + path;
+  const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!r.ok) throw new Error(`API ${r.status}: ${path}`);
+  return r.json();
+}
+
+async function getAddressBalance(addr) {
+  try {
+    return await apiGet(`/blockchain/balance?address=${addr}`);
+  } catch {
+    return { confirmed: { nanoErgs: 0, tokens: [] } };
+  }
+}
+
+async function getAddressTxs(addr, limit = 20, offset = 0) {
+  try {
+    const data = await apiGet(`/blockchain/transaction/byAddress?address=${addr}&limit=${limit}&offset=${offset}`);
+    return Array.isArray(data) ? data : (data.items || []);
+  } catch {
+    return [];
+  }
+}
+
+async function getTransaction(txId) {
+  try {
+    return await apiGet(`/blockchain/transaction/byId/${txId}`);
+  } catch {
+    return null;
+  }
+}
+
+// === ADDRESS UTILITIES ===
+function isWallet(addr) { return addr && addr.startsWith('9'); }
+function isContract(addr) { return addr && !addr.startsWith('9'); }
+function shortAddr(addr) { return addr ? addr.slice(0, 8) + '...' + addr.slice(-6) : '??'; }
+function nanoToErg(n) { return (n / 1e9).toFixed(4); }
+
+function addrType(addr) {
+  if (!addr) return 'unknown';
+  if (addr.startsWith('9')) return 'wallet';
+  // Known mining-related prefixes (common Ergo mining contracts)
+  if (addr.startsWith('88dhg') || addr.startsWith('2Z4t')) return 'mining';
+  return 'contract';
+}
+
+function nodeColor(addr) {
+  if (addr === rootAddress) return '#43e97b';
+  const t = addrType(addr);
+  if (t === 'wallet') return '#4facfe';
+  if (t === 'mining') return '#f5a623';
+  return '#b388ff';
+}
+
+// === DATA FETCHING ===
+async function fetchAddressData(addr) {
+  if (cache.has(addr)) return cache.get(addr);
+
+  const [balance, txs] = await Promise.all([
+    getAddressBalance(addr),
+    getAddressTxs(addr, 30),
+  ]);
+
+  const data = {
+    address: addr,
+    balance: balance.confirmed ? balance.confirmed.nanoErgs || 0 : (balance.nanoErgs || 0),
+    tokens: balance.confirmed ? balance.confirmed.tokens || [] : (balance.tokens || []),
+    txs: txs,
+  };
+  cache.set(addr, data);
+  return data;
+}
+
+// === GRAPH BUILDING ===
+function addGraphNode(addr, depth) {
+  if (graphNodes.has(addr)) {
+    const existing = graphNodes.get(addr);
+    existing.depth = Math.min(existing.depth, depth);
+    return existing;
+  }
+  const node = {
+    id: addr,
+    depth: depth,
+    type: addrType(addr),
+    loaded: false,
+    expanded: false,
+    balance: 0,
+    tokens: [],
+  };
+  graphNodes.set(addr, node);
+  return node;
+}
+
+function addGraphLink(source, target, txId, value) {
+  const exists = graphLinks.some(l =>
+    l.source === source && l.target === target && l.txId === txId
+  );
+  if (!exists) {
+    graphLinks.push({ source, target, txId, value: value || 0 });
+  }
+}
+
+async function expandAddress(addr, depth) {
+  if (depth > maxDepth) return;
+  const node = graphNodes.get(addr);
+  if (node && node.expanded) return;
+
+  const data = await fetchAddressData(addr);
+  const gn = addGraphNode(addr, depth);
+  gn.balance = data.balance;
+  gn.tokens = data.tokens;
+  gn.loaded = true;
+  gn.expanded = true;
+
+  const connectedAddrs = new Set();
+
+  for (const tx of data.txs) {
+    // Parse outputs to find where money went
+    for (const out of (tx.outputs || [])) {
+      const outAddr = out.address;
+      if (!outAddr || outAddr === addr) continue;
+      addGraphNode(outAddr, depth + 1);
+      addGraphLink(addr, outAddr, tx.id, out.value || 0);
+      connectedAddrs.add(outAddr);
+    }
+
+    // Parse inputs to find where money came from
+    for (const inp of (tx.inputs || [])) {
+      const inAddr = inp.address;
+      if (!inAddr || inAddr === addr) continue;
+      addGraphNode(inAddr, depth + 1);
+      addGraphLink(inAddr, addr, tx.id, inp.value || 0);
+      connectedAddrs.add(inAddr);
+    }
+  }
+
+  // Queue preloading of connected addresses (next depth)
+  if (depth + 1 <= maxDepth) {
+    for (const ca of connectedAddrs) {
+      const cn = graphNodes.get(ca);
+      if (cn && !cn.expanded && !preloadQueue.includes(ca)) {
+        preloadQueue.push({ addr: ca, depth: depth + 1 });
+      }
+    }
+    kickPreloader();
+  }
+
+  renderGraph();
+}
+
+// === PRELOADER ===
+async function kickPreloader() {
+  if (preloading) return;
+  preloading = true;
+  while (preloadQueue.length > 0) {
+    // Process in batches of 3 for speed
+    const batch = preloadQueue.splice(0, 3);
+    await Promise.all(batch.map(async ({ addr, depth }) => {
+      try {
+        const data = await fetchAddressData(addr);
+        const gn = graphNodes.get(addr);
+        if (gn) {
+          gn.balance = data.balance;
+          gn.tokens = data.tokens;
+          gn.loaded = true;
+        }
+      } catch { /* silent */ }
+    }));
+  }
+  preloading = false;
+}
+
+// === VISUALIZATION ===
+function initSVG() {
+  const container = document.getElementById('canvas-container');
+  svg = d3.select('#tree-svg');
+  svg.selectAll('*').remove();
+
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+
+  zoom = d3.zoom()
+    .scaleExtent([0.1, 5])
+    .on('zoom', (e) => {
+      gMain.attr('transform', e.transform);
+    });
+
+  svg.call(zoom);
+
+  const gMain = svg.append('g').attr('class', 'main-group');
+  gLinks = gMain.append('g').attr('class', 'links-group');
+  gNodes = gMain.append('g').attr('class', 'nodes-group');
+
+  // Arrow marker
+  svg.append('defs').append('marker')
+    .attr('id', 'arrowhead')
+    .attr('viewBox', '0 -5 10 10')
+    .attr('refX', 20)
+    .attr('refY', 0)
+    .attr('markerWidth', 6)
+    .attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,-5L10,0L0,5')
+    .attr('fill', '#1e2a42');
+
+  simulation = d3.forceSimulation()
+    .force('link', d3.forceLink().id(d => d.id).distance(120).strength(0.4))
+    .force('charge', d3.forceManyBody().strength(-400))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collision', d3.forceCollide().radius(35))
+    .on('tick', ticked);
+}
+
+function renderGraph() {
+  const nodes = Array.from(graphNodes.values());
+  const links = graphLinks.map(l => ({
+    source: typeof l.source === 'string' ? l.source : l.source.id,
+    target: typeof l.target === 'string' ? l.target : l.target.id,
+    txId: l.txId,
+    value: l.value,
+  }));
+
+  // Update links
+  const link = gLinks.selectAll('.link')
+    .data(links, d => d.source + '-' + d.target + '-' + d.txId);
+
+  link.exit().remove();
+
+  const linkEnter = link.enter()
+    .append('line')
+    .attr('class', 'link')
+    .attr('marker-end', 'url(#arrowhead)');
+
+  // Update nodes
+  const node = gNodes.selectAll('.node-group')
+    .data(nodes, d => d.id);
+
+  node.exit().remove();
+
+  const nodeEnter = node.enter()
+    .append('g')
+    .attr('class', 'node-group')
+    .call(d3.drag()
+      .on('start', dragStart)
+      .on('drag', dragging)
+      .on('end', dragEnd))
+    .on('click', (e, d) => onNodeClick(e, d))
+    .on('dblclick', (e, d) => onNodeDblClick(e, d))
+    .on('mouseover', (e, d) => onNodeHover(e, d, true))
+    .on('mouseout', (e, d) => onNodeHover(e, d, false));
+
+  nodeEnter.append('circle')
+    .attr('class', 'node-circle')
+    .attr('r', d => d.id === rootAddress ? 16 : (d.type === 'contract' ? 10 : 12))
+    .attr('fill', d => nodeColor(d.id))
+    .attr('fill-opacity', 0.2)
+    .attr('stroke', d => nodeColor(d.id));
+
+  // Contract badge
+  nodeEnter.filter(d => d.type === 'contract')
+    .append('text')
+    .attr('class', 'node-badge')
+    .attr('text-anchor', 'middle')
+    .attr('dy', 3.5)
+    .text('C');
+
+  // Mining badge
+  nodeEnter.filter(d => d.type === 'mining')
+    .append('text')
+    .attr('class', 'node-badge')
+    .attr('text-anchor', 'middle')
+    .attr('dy', 3.5)
+    .text('M');
+
+  // Address label
+  nodeEnter.append('text')
+    .attr('class', 'node-label')
+    .attr('dy', d => (d.id === rootAddress ? 28 : 24))
+    .attr('text-anchor', 'middle')
+    .text(d => shortAddr(d.id));
+
+  // Balance label
+  nodeEnter.append('text')
+    .attr('class', 'node-balance')
+    .attr('dy', d => (d.id === rootAddress ? 40 : 36))
+    .attr('text-anchor', 'middle')
+    .text(d => d.loaded ? nanoToErg(d.balance) + ' ERG' : '');
+
+  // Update existing balance labels
+  gNodes.selectAll('.node-group').select('.node-balance')
+    .text(d => d.loaded ? nanoToErg(d.balance) + ' ERG' : '');
+
+  // Restart simulation
+  simulation.nodes(nodes);
+  simulation.force('link').links(links);
+  simulation.alpha(0.3).restart();
+}
+
+function ticked() {
+  gLinks.selectAll('.link')
+    .attr('x1', d => d.source.x)
+    .attr('y1', d => d.source.y)
+    .attr('x2', d => d.target.x)
+    .attr('y2', d => d.target.y);
+
+  gNodes.selectAll('.node-group')
+    .attr('transform', d => `translate(${d.x},${d.y})`);
+}
+
+function dragStart(e, d) {
+  if (!e.active) simulation.alphaTarget(0.3).restart();
+  d.fx = d.x;
+  d.fy = d.y;
+}
+function dragging(e, d) {
+  d.fx = e.x;
+  d.fy = e.y;
+}
+function dragEnd(e, d) {
+  if (!e.active) simulation.alphaTarget(0);
+  d.fx = null;
+  d.fy = null;
+}
+
+// === NODE INTERACTIONS ===
+function onNodeClick(e, d) {
+  e.stopPropagation();
+  showInfoPanel(d.id);
+}
+
+async function onNodeDblClick(e, d) {
+  e.stopPropagation();
+  if (d.expanded) {
+    showToast('Already expanded');
+    return;
+  }
+  showToast('Expanding ' + shortAddr(d.id) + '...');
+  await expandAddress(d.id, d.depth);
+  showToast('Expanded ' + shortAddr(d.id));
+}
+
+function onNodeHover(e, d, entering) {
+  // Highlight connected links
+  gLinks.selectAll('.link')
+    .classed('highlighted', l => {
+      if (!entering) return false;
+      const sid = typeof l.source === 'string' ? l.source : l.source.id;
+      const tid = typeof l.target === 'string' ? l.target : l.target.id;
+      return sid === d.id || tid === d.id;
+    });
+}
+
+// === INFO PANEL ===
+async function showInfoPanel(addr) {
+  const panel = document.getElementById('info-panel');
+  const body = document.getElementById('info-panel-body');
+  const title = document.getElementById('panel-title');
+
+  panel.classList.add('open');
+  title.textContent = isWallet(addr) ? 'Wallet Details' : 'Contract Details';
+
+  body.innerHTML = '<div style="text-align:center;padding:30px"><div class="spinner"></div></div>';
+
+  const data = await fetchAddressData(addr);
+  const gn = graphNodes.get(addr);
+
+  let html = '';
+
+  // Address section
+  html += `<div class="info-section">
+    <h4>Address</h4>
+    <div style="font-size:11px;word-break:break-all;color:var(--accent);margin-bottom:6px">${addr}</div>
+    <div class="info-row">
+      <span class="label">Type</span>
+      <span class="value ${isContract(addr) ? 'contract' : ''}">${addrType(addr).toUpperCase()}</span>
+    </div>
+    <div class="info-row">
+      <span class="label">Balance</span>
+      <span class="value erg">${nanoToErg(data.balance)} ERG</span>
+    </div>
+    <div class="info-row">
+      <span class="label">Depth</span>
+      <span class="value">${gn ? gn.depth : '?'}</span>
+    </div>
+    <div class="info-row">
+      <span class="label">Expanded</span>
+      <span class="value">${gn && gn.expanded ? 'Yes' : 'No (double-click to expand)'}</span>
+    </div>
+  </div>`;
+
+  // Tokens section
+  if (data.tokens && data.tokens.length > 0) {
+    html += `<div class="info-section"><h4>Tokens (${data.tokens.length})</h4><div class="token-list">`;
+    for (const t of data.tokens) {
+      const name = t.name || shortAddr(t.tokenId);
+      const amt = t.amount || 0;
+      const decimals = t.decimals || 0;
+      const displayAmt = decimals > 0 ? (amt / Math.pow(10, decimals)).toFixed(decimals) : amt;
+      html += `<div class="token-item">
+        <span class="token-name">${name}</span>
+        <span class="token-amount">${displayAmt}</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Transactions section
+  if (data.txs && data.txs.length > 0) {
+    html += `<div class="info-section"><h4>Recent Transactions (${data.txs.length})</h4><div class="tx-list">`;
+    for (const tx of data.txs.slice(0, 20)) {
+      const inCount = (tx.inputs || []).length;
+      const outCount = (tx.outputs || []).length;
+      const totalOut = (tx.outputs || []).reduce((s, o) => s + (o.value || 0), 0);
+      html += `<div class="tx-item" onclick="inspectTx('${tx.id}')">
+        <div class="tx-id">${tx.id ? tx.id.slice(0, 20) + '...' : 'unknown'}</div>
+        <div class="tx-meta">${inCount} inputs, ${outCount} outputs | ${nanoToErg(totalOut)} ERG total</div>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Connected addresses
+  const connected = [];
+  for (const l of graphLinks) {
+    const sid = typeof l.source === 'string' ? l.source : l.source.id;
+    const tid = typeof l.target === 'string' ? l.target : l.target.id;
+    if (sid === addr && !connected.includes(tid)) connected.push(tid);
+    if (tid === addr && !connected.includes(sid)) connected.push(sid);
+  }
+  if (connected.length > 0) {
+    html += `<div class="info-section"><h4>Connected (${connected.length})</h4>`;
+    for (const ca of connected.slice(0, 30)) {
+      const ctype = addrType(ca);
+      html += `<div class="info-row">
+        <span class="addr-short" onclick="showInfoPanel('${ca}')">${shortAddr(ca)}</span>
+        <span class="value ${isContract(ca) ? 'contract' : ''}">${ctype}</span>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  body.innerHTML = html;
+}
+
+function closePanel() {
+  document.getElementById('info-panel').classList.remove('open');
+}
+
+async function inspectTx(txId) {
+  const body = document.getElementById('info-panel-body');
+  body.innerHTML = '<div style="text-align:center;padding:30px"><div class="spinner"></div></div>';
+
+  const tx = await getTransaction(txId);
+  if (!tx) {
+    body.innerHTML = '<div style="padding:20px;color:var(--red)">Failed to load transaction</div>';
+    return;
+  }
+
+  let html = `<div class="info-section">
+    <h4>Transaction</h4>
+    <div style="font-size:10px;word-break:break-all;color:var(--accent);margin-bottom:8px">${txId}</div>
+  </div>`;
+
+  html += `<div class="info-section"><h4>Inputs (${(tx.inputs||[]).length})</h4>`;
+  for (const inp of (tx.inputs || [])) {
+    const a = inp.address || 'unknown';
+    html += `<div class="info-row">
+      <span class="addr-short" onclick="showInfoPanel('${a}')">${shortAddr(a)}</span>
+      <span class="value erg">${nanoToErg(inp.value || 0)} ERG</span>
+    </div>`;
+  }
+  html += '</div>';
+
+  html += `<div class="info-section"><h4>Outputs (${(tx.outputs||[]).length})</h4>`;
+  for (const out of (tx.outputs || [])) {
+    const a = out.address || 'unknown';
+    html += `<div class="info-row">
+      <span class="addr-short" onclick="showInfoPanel('${a}')">${shortAddr(a)}</span>
+      <span class="value erg">${nanoToErg(out.value || 0)} ERG</span>
+    </div>`;
+  }
+  html += '</div>';
+
+  document.getElementById('panel-title').textContent = 'Transaction';
+  body.innerHTML = html;
+}
+
+// === MAIN SCAN ===
+async function startScan() {
+  const addr = document.getElementById('address-input').value.trim();
+  if (!addr) {
+    showToast('Enter a wallet address');
+    return;
+  }
+  if (!activeNode) {
+    showToast('No active node - check connection');
+    return;
+  }
+
+  maxDepth = parseInt(document.getElementById('depth-slider').value);
+
+  // Reset state
+  cache.clear();
+  graphNodes.clear();
+  graphLinks.length = 0;
+  preloadQueue = [];
+  rootAddress = addr;
+
+  showLoading(true, 'Scanning ' + shortAddr(addr) + '...');
+  document.getElementById('scan-btn').disabled = true;
+
+  try {
+    initSVG();
+    addGraphNode(addr, 0);
+    await expandAddress(addr, 0);
+    showLoading(false);
+    showToast('Scan complete! Double-click nodes to expand further.');
+
+    // Auto-fit view
+    const container = document.getElementById('canvas-container');
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    svg.transition().duration(500).call(
+      zoom.transform,
+      d3.zoomIdentity.translate(w/2, h/2).scale(0.8).translate(-w/2, -h/2)
+    );
+  } catch (err) {
+    showLoading(false);
+    showToast('Error: ' + err.message);
+  }
+
+  document.getElementById('scan-btn').disabled = false;
+}
+
+// === UI HELPERS ===
+function showLoading(show, text) {
+  const el = document.getElementById('loading-overlay');
+  if (show) {
+    el.classList.add('show');
+    document.getElementById('loading-text').textContent = text || 'Loading...';
+  } else {
+    el.classList.remove('show');
+  }
+}
+
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// === DEPTH SLIDER ===
+document.getElementById('depth-slider').addEventListener('input', function() {
+  document.getElementById('depth-val').textContent = this.value;
+  maxDepth = parseInt(this.value);
+});
+
+// === ENTER KEY ===
+document.getElementById('address-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') startScan();
+});
+
+// === INIT ===
+checkNodes();
+</script>
+
+</body>
+</html>
