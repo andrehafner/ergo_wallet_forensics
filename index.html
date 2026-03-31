@@ -393,32 +393,102 @@ async function checkNodes() {
 async function apiGet(path) {
   if (!activeNode) throw new Error('No active node');
   const url = activeNode + path;
+  console.log('[API GET]', url);
   const r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-  if (!r.ok) throw new Error(`API ${r.status}: ${path}`);
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    console.error('[API ERR]', r.status, path, text);
+    throw new Error(`API ${r.status}: ${path}`);
+  }
   return r.json();
 }
 
+async function apiPost(path, body) {
+  if (!activeNode) throw new Error('No active node');
+  const url = activeNode + path;
+  console.log('[API POST]', url);
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    console.error('[API ERR]', r.status, path, text);
+    throw new Error(`API ${r.status}: ${path}`);
+  }
+  return r.json();
+}
+
+// Try multiple endpoint patterns since node versions differ
 async function getAddressBalance(addr) {
+  // Try GET with path param first (extraIndex nodes)
+  const attempts = [
+    () => apiGet(`/blockchain/balanceForAddress/${addr}`),
+    () => apiGet(`/blockchain/balance/byAddress/${addr}`),
+  ];
+  for (const attempt of attempts) {
+    try {
+      const data = await attempt();
+      console.log('[BALANCE]', addr.slice(0,8), data);
+      return data;
+    } catch(e) { /* try next */ }
+  }
+  // Fallback: compute from unspent boxes
   try {
-    return await apiGet(`/blockchain/balance?address=${addr}`);
-  } catch {
-    return { confirmed: { nanoErgs: 0, tokens: [] } };
+    const boxes = await getUnspentBoxes(addr);
+    const nanoErgs = boxes.reduce((s, b) => s + (b.value || 0), 0);
+    const tokenMap = {};
+    for (const box of boxes) {
+      for (const t of (box.assets || [])) {
+        if (!tokenMap[t.tokenId]) tokenMap[t.tokenId] = { tokenId: t.tokenId, amount: 0, name: t.name, decimals: t.decimals };
+        tokenMap[t.tokenId].amount += t.amount || 0;
+      }
+    }
+    return { nanoErgs, tokens: Object.values(tokenMap) };
+  } catch(e) {
+    console.error('[BALANCE FAIL]', addr.slice(0,8), e.message);
+    return { nanoErgs: 0, tokens: [] };
   }
 }
 
-async function getAddressTxs(addr, limit = 20, offset = 0) {
-  try {
-    const data = await apiGet(`/blockchain/transaction/byAddress?address=${addr}&limit=${limit}&offset=${offset}`);
-    return Array.isArray(data) ? data : (data.items || []);
-  } catch {
-    return [];
+async function getUnspentBoxes(addr) {
+  const attempts = [
+    () => apiGet(`/blockchain/box/unspent/byAddress/${addr}?offset=0&limit=100`),
+    () => apiPost(`/blockchain/box/unspent/byAddress`, addr),
+  ];
+  for (const attempt of attempts) {
+    try {
+      const data = await attempt();
+      return Array.isArray(data) ? data : (data.items || []);
+    } catch { /* try next */ }
   }
+  return [];
+}
+
+async function getAddressTxs(addr, limit = 30, offset = 0) {
+  const attempts = [
+    () => apiGet(`/blockchain/transaction/byAddress/${addr}?offset=${offset}&limit=${limit}`),
+    () => apiPost(`/blockchain/transaction/byAddress`, addr),
+  ];
+  for (const attempt of attempts) {
+    try {
+      const data = await attempt();
+      const txs = Array.isArray(data) ? data : (data.items || []);
+      console.log('[TXS]', addr.slice(0,8), txs.length, 'transactions');
+      return txs;
+    } catch(e) { /* try next */ }
+  }
+  console.error('[TXS FAIL]', addr.slice(0,8), 'all attempts failed');
+  return [];
 }
 
 async function getTransaction(txId) {
   try {
     return await apiGet(`/blockchain/transaction/byId/${txId}`);
-  } catch {
+  } catch(e) {
+    console.error('[TX FAIL]', txId.slice(0,8), e.message);
     return null;
   }
 }
@@ -454,12 +524,24 @@ async function fetchAddressData(addr) {
     getAddressTxs(addr, 30),
   ]);
 
+  // Handle various balance response formats
+  let nanoErgs = 0;
+  let tokens = [];
+  if (balance.confirmed) {
+    nanoErgs = balance.confirmed.nanoErgs || 0;
+    tokens = balance.confirmed.tokens || [];
+  } else {
+    nanoErgs = balance.nanoErgs || 0;
+    tokens = balance.tokens || [];
+  }
+
   const data = {
     address: addr,
-    balance: balance.confirmed ? balance.confirmed.nanoErgs || 0 : (balance.nanoErgs || 0),
-    tokens: balance.confirmed ? balance.confirmed.tokens || [] : (balance.tokens || []),
+    balance: nanoErgs,
+    tokens: tokens,
     txs: txs,
   };
+  console.log('[FETCHED]', addr.slice(0,8), '|', nanoToErg(nanoErgs), 'ERG |', txs.length, 'txs |', tokens.length, 'tokens');
   cache.set(addr, data);
   return data;
 }
