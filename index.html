@@ -142,15 +142,17 @@
 
   .link {
     fill: none;
-    stroke: var(--border);
     stroke-width: 1.5;
-    stroke-opacity: 0.5;
+    stroke-opacity: 0.45;
   }
+  .link.dir-out { stroke: #ff6b6b; }
+  .link.dir-in  { stroke: #43e97b; }
   .link.highlighted {
-    stroke: var(--accent);
     stroke-opacity: 1;
     stroke-width: 2.5;
   }
+  .link.highlighted.dir-out { stroke: #ff8a8a; }
+  .link.highlighted.dir-in  { stroke: #5cffaa; }
   .link-value {
     font-size: 8px;
     fill: var(--text-dim);
@@ -415,6 +417,8 @@
   <span><span class="swatch" style="background: var(--orange)"></span> Mining</span>
   <span><span class="swatch" style="background: #00f2fe"></span> Service</span>
   <span><span class="swatch" style="background: var(--green)"></span> Root</span>
+  <span style="margin-left:12px;border-left:1px solid var(--border);padding-left:12px"><span class="swatch" style="background:#ff6b6b"></span> Sent</span>
+  <span><span class="swatch" style="background:#43e97b"></span> Received</span>
 </div>
 
 <script>
@@ -712,12 +716,12 @@ function addGraphNode(addr, depth) {
   return node;
 }
 
-function addGraphLink(source, target, txId, value) {
+function addGraphLink(source, target, txId, value, direction) {
   const exists = graphLinks.some(l =>
     l.source === source && l.target === target && l.txId === txId
   );
   if (!exists) {
-    graphLinks.push({ source, target, txId, value: value || 0 });
+    graphLinks.push({ source, target, txId, value: value || 0, direction: direction || 'out' });
   }
 }
 
@@ -741,7 +745,7 @@ async function expandAddress(addr, depth) {
       const outAddr = out.address;
       if (!outAddr || outAddr === addr) continue;
       addGraphNode(outAddr, depth + 1);
-      addGraphLink(addr, outAddr, tx.id, out.value || 0);
+      addGraphLink(addr, outAddr, tx.id, out.value || 0, 'out');
       connectedAddrs.add(outAddr);
     }
 
@@ -750,7 +754,7 @@ async function expandAddress(addr, depth) {
       const inAddr = inp.address;
       if (!inAddr || inAddr === addr) continue;
       addGraphNode(inAddr, depth + 1);
-      addGraphLink(inAddr, addr, tx.id, inp.value || 0);
+      addGraphLink(inAddr, addr, tx.id, inp.value || 0, 'in');
       connectedAddrs.add(inAddr);
     }
   }
@@ -837,13 +841,16 @@ function initSVG() {
   gNodes = gMain.append('g').attr('class', 'nodes-group');
 
   const defs = svg.append('defs');
-  defs.append('marker')
-    .attr('id', 'arrowhead')
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 18).attr('refY', 0)
-    .attr('markerWidth', 6).attr('markerHeight', 6)
-    .attr('orient', 'auto')
-    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#2a3a5c');
+  // Arrowheads per direction
+  for (const [id, color] of [['arrow-out','#ff6b6b'],['arrow-in','#43e97b']]) {
+    defs.append('marker')
+      .attr('id', id)
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 18).attr('refY', 0)
+      .attr('markerWidth', 6).attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', color).attr('fill-opacity', 0.6);
+  }
 
   const glow = defs.append('filter').attr('id', 'glow');
   glow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'blur');
@@ -874,6 +881,7 @@ function renderGraph() {
     target: typeof l.target === 'string' ? l.target : l.target.id,
     txId: l.txId,
     value: l.value,
+    direction: l.direction || 'out',
   }));
 
   const radii = ringRadii();
@@ -918,8 +926,8 @@ function renderGraph() {
   linkSel.exit().remove();
   linkSel.enter()
     .append('path')
-    .attr('class', 'link link-path')
-    .attr('marker-end', 'url(#arrowhead)');
+    .attr('class', d => `link link-path dir-${d.direction}`)
+    .attr('marker-end', d => `url(#arrow-${d.direction})`);
 
   // --- Nodes ---
   const node = gNodes.selectAll('.node-group')
